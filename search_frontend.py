@@ -9,6 +9,8 @@ import math
 import os
 import time
 import numpy as np
+# from gensim.models import KeyedVectors
+
 from inverted_index_gcp import InvertedIndex
 class MyFlaskApp(Flask):
     def run(self, host=None, port=None, debug=None, **options):
@@ -159,9 +161,6 @@ def initialize():
 # Initialize the search engine when the server starts
 initialize()
 
-
-
-
 def get_body_scores(query, n, w_body):
     """
     Calculate body scores using TF-IDF and Cosine Similarity.
@@ -187,14 +186,14 @@ def get_body_scores(query, n, w_body):
         if tok in tier1_index.df:
             # Retrieve the posting list for the term
             temp_list = np.array(tier1_index.read_posting_list(tok, base_dir=base_dir), dtype=np.int32)
-            print(f"Tier1 index found for term: {tok} - list size: {len(temp_list)}")
+            print(f"Tier1 index found for term: {tok} - list size: {len(temp_list)}") # Debug print
             if len(temp_list) >= 100:
                 posting_list = temp_list
                 df = tier1_index.df[tok]
 
         # When there is no enough data in tier1
         if posting_list is None and (tok in body_index.df):
-            print(f"Falling back to full body index for term: {tok} with size {len(temp_list)}")
+            print(f"Falling back to full body index for term: {tok} with size {len(temp_list)}") # Debug print
             # Retrieve the posting list from the full body index
             posting_list = np.array(body_index.read_posting_list(tok, base_dir=base_dir), dtype=np.int32)
             df = body_index.df[tok]
@@ -244,16 +243,16 @@ def search():
     query = request.args.get('query', '')
     if len(query) == 0:
       return jsonify(res)
-    # BEGIN SOLUTION
 
-    # Tokenize the query using the provided tokenizer
-    query_tokens = tokenize_txt(query)
+    # Tokenize the query with expansion
+    query_tokens = tokenize_with_expansion(query, limit=1, expand=True)
     if not query_tokens:
         return jsonify(res)
+    print(f"Tokenized Query: {query_tokens}")
 
     # Define weights for different components of the scoring
     W_TITLE = 0.5
-    W_BODY = 0.2
+    W_BODY = 0.3
     W_ANCHOR = 0.3
     W_PR = 0.1
     W_PV = 0.1
@@ -267,15 +266,19 @@ def search():
 
     # Get scores using only the tier1 index for efficiency
     total_scores = get_body_scores(query_tokens, N, w_body=W_BODY)
+    if 0 in total_scores.keys():
+        print(total_scores[0])
 
     # Create a set of candidate document IDs from body scores
     candidate_ids = np.array(list(total_scores.keys()), dtype=np.int32)
 
     t_body = time.time()  # -------------------------
-    print(f"[PERF] Body scoring took: {t_body - t_start:.4f}s Candidates: {len(total_scores)}")
+    print(f"[PERF] Body scoring took: {t_body - t_start:.4f}s Candidates: {len(total_scores)}\n")
+
     # -------------------------------------------------------
     # Title Index
     # -------------------------------------------------------
+
     t_start = time.time()  # -------------------------
 
     # Iterate over each term in the query
@@ -301,7 +304,7 @@ def search():
             print(f"Term {term} not found in title index.")
 
     extra_end = time.time()
-    print(f"[PERF] Title took: {extra_end - t_start:.4f}s")
+    print(f"[PERF] Title took: {extra_end - t_start:.4f}s\n")
 
     # -------------------------------------------------------
     # Anchor Index
@@ -323,6 +326,8 @@ def search():
                     # Update scores for relevant document IDs
                     for doc_id in relevant_ids:
                         total_scores[int(doc_id)] += W_ANCHOR
+                        if doc_id == 0:
+                            print("Anchor matched doc_id 0 for term:", term)
 
             except KeyError:
                 print(f"Term {term} not found in anchor index postings.")
@@ -339,6 +344,8 @@ def search():
     # Integrate PageRank and PageView into the final scoring
     final_results = []
     for doc_id, score in top_candidate_ids:
+        if doc_id == 0:
+            print("Final matched doc_id 0 for")
         # Retrieve PageRank and PageView scores
         pr = pagerank.get(doc_id, 0.00000001)
         pv = pageviews.get(doc_id, 0)
@@ -359,7 +366,6 @@ def search():
     top_100 = sorted(final_results, key=lambda x: x[1], reverse=True)[:100]
 
     # Prepare the final output format (wiki_id, title)
-    print(top_100[0])
     res = [(str(doc_id), id_to_title.get(doc_id, "Unknown Title")) for doc_id, score in top_100]
 
     # END SOLUTION
@@ -387,47 +393,44 @@ def search_body():
         return jsonify(res)
     # BEGIN SOLUTION
 
-    # ספירת תדירויות בשאילתה (tf_q)
+    #
     query_counts = Counter(tokenize_txt(query))
 
-    # מילון צובר לציונים: {doc_id: accumulated_score}
+    #
     candidate_scores = Counter()
 
-    # N - מספר המסמכים הכולל (קבוע עבור ויקיפדיה האנגלית)
+    #
     N = 6348910
 
-    # 2. מעבר על כל מילה בשאילתה ושליפת רשימות פוסטינג
+    #
     for term, tf_q in query_counts.items():
         if term not in body_index.df:
           continue
 
-        # חישוב IDF עבור המילה
+        #
         df = body_index.df[term]
         idf = math.log10(N / df)
 
-        # משקל המילה בשאילתה
+        #
         w_t_q = tf_q * idf
 
-        # קריאת רשימת הפוסטינג מה-Bucket/דיסק
-        # הערה: המתודה read_posting_list חייבת להיות ממומשת בתוך InvertedIndex
+        #
         try:
             posting_list = body_index.read_posting_list(term, base_dir='.')
         except KeyError:
             continue
 
-        # 3. עדכון ציונים לכל המסמכים המכילים את המילה
+        #
         for doc_id, tf_d in posting_list:
-            # חישוב TF-IDF של המסמך (w_t_d)
+            #
             w_t_d = tf_d * idf
-            # הוספה לצובר (המכפלה הסקלרית במונה)
+            #
             candidate_scores[doc_id] += (w_t_q * w_t_d)
 
     if not candidate_scores:
       return jsonify([])
 
-    # 4. נרמול ומיון (נרמול לפי אורך המסמך למניעת הטיה)
-    # הערה: אם יש לך מילון של נורמות שהכנת ב-GCP (למשל doc_norms), השתמש בו כאן.
-    # אם אין, הדירוג יתבסס על המכפלה הסקלרית בלבד.
+    #
     results = []
     for doc_id, score in candidate_scores.items():
         try:
@@ -439,10 +442,10 @@ def search_body():
         final_score = score / norm
         results.append((doc_id, final_score))
 
-    # מיון לפי הציון מהגבוה לנמוך ולקיחת 100 הראשונים
+    #
     top_100 = sorted(results, key=lambda x: x[1], reverse=True)[:100]
 
-    # 5. המרה לפורמט הנדרש: (wiki_id, title)
+    #
     res = [(str(doc_id), id_to_title.get(doc_id, "Title not found")) for doc_id, score in top_100]
     # END SOLUTION
     return jsonify(res)
@@ -474,41 +477,33 @@ def search_title():
     if len(query) == 0:
         return jsonify(res)
     # BEGIN SOLUTION
-    # 1. טוקניזציה של השאילתה - שימוש בטוקנייזר שסופק
+
     #
     query_tokens = tokenize_txt(query)
 
-    # שימוש ב-Counter כדי לספור מילים ייחודיות
-    # המפתח הוא doc_id והערך הוא מספר המילים השונות מהשאילתה שמופיעות בכותרת
+    #
     doc_scores = Counter()
 
-    # 2. מעבר על כל מילה בשאילתה
+    #
     for term in query_tokens:
-        # דילוג על מילים שלא נמצאות באינדקס הכותרות
-        # אנו משתמשים במשתנה הגלובלי title_index שנטען ב-initialize
+
+        #
         if term not in title_index.df:
             continue
 
-        # שליפת רשימת המסמכים (Posting List) עבור המילה
-        # הפונקציה read_posting_list מוגדרת ב-inverted_index_gcp.py
-        # היא קוראת את המידע מה-Bucket בעזרת המיקומים שנשמרו בזיכרון
         #
         try:
             posting_list = title_index.read_posting_list(term, base_dir='.')
         except Exception as e:
             print(f"Error reading posting list for term {term}: {e}")
             continue
-        # עדכון הציון לכל מסמך שבו המילה מופיעה
-        # אנו מוסיפים 1 עבור כל מילה ייחודית מהשאילתה שנמצאת בכותרת
+        #
         for doc_id, tf in posting_list:
             doc_scores[doc_id] += 1
 
-    # 3. מיון התוצאות
-    # המיון הוא לפי הציון (מספר המילים המותאמות) בסדר יורד
+    #
     sorted_docs = sorted(doc_scores.items(), key=lambda x: x[1], reverse=True)
 
-    # 4. יצירת רשימת התוצאות בפורמט (doc_id, title)
-    # שימוש במשתנה הגלובלי id_to_title לתרגום ID לכותרת
     #
     for doc_id, score in sorted_docs:
         title = id_to_title.get(doc_id, "Title Unknown")
