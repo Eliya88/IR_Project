@@ -78,6 +78,7 @@ def download_index_files(directory='postings_gcp'):
     """
     # Create directory if it doesn't exist
     if not os.path.exists(directory):
+        print(f"Creating directory {os.path}...")
         os.makedirs(directory)
 
     print("Downloading index binary files to local disk...")
@@ -88,7 +89,7 @@ def download_index_files(directory='postings_gcp'):
         if blob.name.endswith('.bin'):
             # Determine local file path
             #local_path = os.path.join('/content', blob.name)
-            local_path = os.path.join(os.getcwd(), blob.name)
+            local_path = os.path.join(os.getcwd(), directory, os.path.basename(blob.name))
             # Skip download if file already exists
             if os.path.exists(local_path):
                 continue
@@ -100,6 +101,16 @@ def download_index_files(directory='postings_gcp'):
             blob.download_to_filename(local_path)
 
     print("Finished downloading binary files.")
+
+def normalize_index_paths(index):
+    """
+    מסירה קידומות נתיב מיותרות מרשימות המיקומים של האינדקס
+    כדי להבטיח עבודה אחידה מול תיקיית postings_gcp
+    """
+    for term in index.posting_locs:
+        # כל מיקום הוא טאפל של (path, offset)
+        # os.path.basename משאיר רק את שם הקובץ (למשל 'file.bin')
+        index.posting_locs[term] = [(os.path.basename(loc[0]), loc[1]) for loc in index.posting_locs[term]]
 
 def initialize():
     """
@@ -125,6 +136,12 @@ def initialize():
     title_index.posting_locs = download_and_load_pickle('title_locs.pkl')
     anchor_index.posting_locs = download_and_load_pickle('anchor_locs.pkl')
 
+    # Normalize index paths
+    normalize_index_paths(body_index)
+    normalize_index_paths(tier1_index)
+    normalize_index_paths(title_index)
+    normalize_index_paths(anchor_index)
+
     # Load id to title mapping
     id_to_title = download_and_load_pickle('id_to_title.pkl')
 
@@ -141,6 +158,8 @@ def initialize():
 
 # Initialize the search engine when the server starts
 initialize()
+
+
 
 
 def get_body_scores(query, n, w_body):
@@ -239,6 +258,7 @@ def search():
     W_PR = 0.1
     W_PV = 0.1
     N = 6348910
+    base_dir = 'postings_gcp'
 
     # -------------------------------------------------------
     # Body Index
@@ -263,7 +283,7 @@ def search():
         if term in title_index.df:
             try:
                 # Retrieve the posting list for the term from the title index
-                posting_list = np.array(title_index.read_posting_list(term, base_dir='postings_gcp'), dtype=np.int32)
+                posting_list = np.array(title_index.read_posting_list(term, base_dir=base_dir), dtype=np.int32)
                 print(f"Title index found for term: {term} - list size: {len(posting_list)}")
                 if len(posting_list) > 0:
                     # Extract document IDs from the posting list
@@ -292,7 +312,7 @@ def search():
     for term in query_tokens:
         if term in anchor_index.df:
             try:
-                posting_list = np.array(anchor_index.read_posting_list(term, base_dir='postings_gcp'), dtype=np.int32)
+                posting_list = np.array(anchor_index.read_posting_list(term, base_dir=base_dir), dtype=np.int32)
                 print(f"Anchor index found for term: {term} - list size: {len(posting_list)}")
 
                 if len(posting_list) > 0:
@@ -339,6 +359,7 @@ def search():
     top_100 = sorted(final_results, key=lambda x: x[1], reverse=True)[:100]
 
     # Prepare the final output format (wiki_id, title)
+    print(top_100[0])
     res = [(str(doc_id), id_to_title.get(doc_id, "Unknown Title")) for doc_id, score in top_100]
 
     # END SOLUTION
@@ -390,7 +411,7 @@ def search_body():
         # קריאת רשימת הפוסטינג מה-Bucket/דיסק
         # הערה: המתודה read_posting_list חייבת להיות ממומשת בתוך InvertedIndex
         try:
-            posting_list = body_index.read_posting_list(term, base_dir='postings_gcp')
+            posting_list = body_index.read_posting_list(term, base_dir='.')
         except KeyError:
             continue
 
@@ -473,7 +494,7 @@ def search_title():
         # היא קוראת את המידע מה-Bucket בעזרת המיקומים שנשמרו בזיכרון
         #
         try:
-            posting_list = title_index.read_posting_list(term, base_dir='postings_gcp')
+            posting_list = title_index.read_posting_list(term, base_dir='.')
         except Exception as e:
             print(f"Error reading posting list for term {term}: {e}")
             continue
@@ -541,7 +562,7 @@ def search_anchor():
         # הפונקציה קוראת את המידע הבינארי וממירה אותו לרשימת (doc_id, tf)
         #
         try:
-            posting_list = anchor_index.read_posting_list(term, base_dir='postings_gcp')
+            posting_list = anchor_index.read_posting_list(term, base_dir='.')
         except Exception as e:
             print(f"Error reading posting list for term {term}: {e}")
             continue
