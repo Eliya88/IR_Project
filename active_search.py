@@ -3,18 +3,19 @@ import time
 import json
 from metrics import results_quality
 
-# with open('queries_train.json', 'rt') as f:
-#   queries = json.load(f)
+with open('queries_train.json', 'rt') as f:
+  queries = json.load(f)
 
-queries = {"Silk Road trade cultural exchange": [], "Ballet origins France Russia": []}
+# queries = {"Silk Road trade cultural exchange": []}
 
 qs_res = []
+EXTERNAL="34.170.95.149"
 for q, true_wids in queries.items():
     duration, ap = None, None
     t_start = time.time()
     try:
         # res = requests.get(url + '/search', {'query': q}, timeout=35)
-        response = requests.get(f"http://127.0.0.1:8080/search?query={q}", timeout=35)
+        response = requests.get(f"http://{EXTERNAL}:8080/search?query={q}", timeout=35)
         duration = time.time() - t_start
 
         if response.status_code == 200:
@@ -30,7 +31,7 @@ for q, true_wids in queries.items():
         print(f"Error during request: {e}")
         continue
 
-average_time = sum(d for _, d, _ in qs_res) / len(qs_res)
-average_rq = sum(rq for _, _, rq in qs_res) / len(qs_res)
+average_time = sum(d for _, d, _ in qs_res) / (len(qs_res) + 1)
+average_rq = sum(rq for _, _, rq in qs_res) / (len(qs_res) + 1)
 print(f"Average Time per Query: {average_time:.2f}s")
 print(f"Average Results Quality: {average_rq}")

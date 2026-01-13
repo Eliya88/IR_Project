@@ -9,7 +9,7 @@ import math
 import os
 import time
 import numpy as np
-# from gensim.models import KeyedVectors
+from gensim.models import KeyedVectors
 
 from inverted_index_gcp import InvertedIndex
 class MyFlaskApp(Flask):
@@ -21,7 +21,7 @@ app = MyFlaskApp(__name__)
 app.config['JSONIFY_PRETTYPRINT_REGULAR'] = False
 
 # GCP Bucket configuration
-BUCKET_NAME = 'ir_bucket13'
+BUCKET_NAME = 'irbucket2'
 client = storage.Client()
 bucket = client.bucket(BUCKET_NAME)
 
@@ -34,7 +34,31 @@ id_to_title = None
 pagerank = None
 doc_norms = None
 pageviews = None
+w2v_model = None
 
+def load_pretrained_w2v(file_name):
+    """
+        Downloads and loads the Word2Vec model with a limit to save RAM.
+    """
+    global w2v_model
+
+    local_path = f"postings_gcp/{file_name}"
+
+    # Download if missing
+    if not os.path.exists(local_path):
+        print(f"Downloading model {file_name} from bucket...")
+        blob = bucket.blob(f"postings_gcp/{file_name}")
+        blob.download_to_filename(local_path)
+        print("Download complete.")
+    # Load the model
+    else:
+        print(f"Model {file_name} already exists on local disk.")
+
+    # Load with a LIMIT to prevent "Killed" (OOM) errors
+    print("Loading Pre-trained Word2Vec model into memory...")
+    # Loads the most common words
+    w2v_model = KeyedVectors.load_word2vec_format(local_path, binary=True, limit=300000)
+    print("Model loaded successfully.")
 
 def download_and_load_pickle(blob_name):
     """
@@ -42,11 +66,29 @@ def download_and_load_pickle(blob_name):
     :param blob_name:
     :return: The unpickled object.
     """
-    # Download from GCP Bucket if not found on Drive
-    print(f"Downloading {blob_name}...")
+    path = f"postings_gcp/{blob_name}"
+
+    if os.path.exists(path):
+        print(f"Loading {blob_name} from local disk...")
+        # print(f"DEBUG: Looking for file at: {os.path.abspath(path)}")
+        # print(f"DEBUG: Current Working Directory is: {os.getcwd()}")
+        try:
+            with open(path, 'rb') as f:
+                return pickle.load(f)
+        except Exception as e:
+            print(f"Error loading {blob_name} from local disk: {e}. Re-downloading from GCP.")
+
+    print(f"Downloading {blob_name} from GCP...")
     blob = bucket.blob(f"postings_gcp/{blob_name}")
-    contents = blob.download_as_bytes()
-    return pickle.loads(contents)
+    blob.download_to_filename(path)
+
+    with open(path, 'rb') as f:
+        return pickle.load(f)
+    # Download from GCP Bucket if not found on Drive
+    # print(f"Downloading {blob_name}...")
+    # blob = bucket.blob(f"postings_gcp/{blob_name}")
+    # contents = blob.download_as_bytes()
+    # return pickle.loads(contents)
 
 def load_pagerank():
     """
@@ -104,16 +146,6 @@ def download_index_files(directory='postings_gcp'):
 
     print("Finished downloading binary files.")
 
-def normalize_index_paths(index):
-    """
-    מסירה קידומות נתיב מיותרות מרשימות המיקומים של האינדקס
-    כדי להבטיח עבודה אחידה מול תיקיית postings_gcp
-    """
-    for term in index.posting_locs:
-        # כל מיקום הוא טאפל של (path, offset)
-        # os.path.basename משאיר רק את שם הקובץ (למשל 'file.bin')
-        index.posting_locs[term] = [(os.path.basename(loc[0]), loc[1]) for loc in index.posting_locs[term]]
-
 def initialize():
     """
     Initialize the search engine by loading indices and data from GCP Bucket.
@@ -121,6 +153,9 @@ def initialize():
     """
     # Define global variables
     global body_index, tier1_index, title_index, anchor_index, id_to_title, pagerank, doc_norms, pageviews
+
+    if body_index is not None:
+        return
 
     print("Initializing Search Engine...")
     # Download index binary files to local disk
@@ -138,12 +173,6 @@ def initialize():
     title_index.posting_locs = download_and_load_pickle('title_locs.pkl')
     anchor_index.posting_locs = download_and_load_pickle('anchor_locs.pkl')
 
-    # Normalize index paths
-    normalize_index_paths(body_index)
-    normalize_index_paths(tier1_index)
-    normalize_index_paths(title_index)
-    normalize_index_paths(anchor_index)
-
     # Load id to title mapping
     id_to_title = download_and_load_pickle('id_to_title.pkl')
 
@@ -156,10 +185,28 @@ def initialize():
     # Load pageviews
     pageviews = download_and_load_pickle('pageviews.pkl')
 
+    # Load pre-trained Word2Vec model
+    load_pretrained_w2v('GoogleNews-vectors-negative300.bin.gz')
+
     print("Initialization complete. Server is ready.")
 
-# Initialize the search engine when the server starts
-initialize()
+def get_text_vector(text):
+    """
+    Get the average Word2Vec vector for the given text.
+    :param text: input text
+    :return: average vector as numpy array
+    """
+    tokens = tokenize_txt(text)
+    vectors = []
+    # Collect vectors for each token
+    for word in tokens:
+        if word in w2v_model:
+            vectors.append(w2v_model[word])
+    # Compute the mean vector
+    if not vectors:
+        return np.zeros(w2v_model.vector_size)
+
+    return np.mean(vectors, axis=0)
 
 def get_body_scores(query, n, w_body):
     """
@@ -187,7 +234,7 @@ def get_body_scores(query, n, w_body):
             # Retrieve the posting list for the term
             temp_list = np.array(tier1_index.read_posting_list(tok, base_dir=base_dir), dtype=np.int32)
             print(f"Tier1 index found for term: {tok} - list size: {len(temp_list)}") # Debug print
-            if len(temp_list) >= 100:
+            if len(temp_list) == 1000:
                 posting_list = temp_list
                 df = tier1_index.df[tok]
 
@@ -245,15 +292,16 @@ def search():
       return jsonify(res)
 
     # Tokenize the query with expansion
-    query_tokens = tokenize_with_expansion(query, limit=1, expand=True)
+    query_tokens = expand_query_w2v(query, model=w2v_model, index=title_index, top_n=1, threshold_df=5000)
+
     if not query_tokens:
         return jsonify(res)
     print(f"Tokenized Query: {query_tokens}")
 
     # Define weights for different components of the scoring
     W_TITLE = 0.5
-    W_BODY = 0.3
-    W_ANCHOR = 0.3
+    W_BODY = 0.2
+    W_ANCHOR = 0.2
     W_PR = 0.1
     W_PV = 0.1
     N = 6348910
@@ -266,8 +314,6 @@ def search():
 
     # Get scores using only the tier1 index for efficiency
     total_scores = get_body_scores(query_tokens, N, w_body=W_BODY)
-    if 0 in total_scores.keys():
-        print(total_scores[0])
 
     # Create a set of candidate document IDs from body scores
     candidate_ids = np.array(list(total_scores.keys()), dtype=np.int32)
@@ -280,7 +326,6 @@ def search():
     # -------------------------------------------------------
 
     t_start = time.time()  # -------------------------
-
     # Iterate over each term in the query
     for term in query_tokens:
         if term in title_index.df:
@@ -291,11 +336,12 @@ def search():
                 if len(posting_list) > 0:
                     # Extract document IDs from the posting list
                     title_ids = posting_list[:, 0]
-                    # Find intersection with candidate IDs
-                    relevant_ids = np.intersect1d(title_ids, candidate_ids, assume_unique=True)
                     # Update scores for relevant document IDs
-                    for doc_id in relevant_ids:
+                    for doc_id in title_ids:
+                        if doc_id == 0:
+                            continue
                         total_scores[int(doc_id)] += W_TITLE
+
 
             except KeyError:
                 print(f"Term {term} not found in title index postings.")
@@ -321,13 +367,12 @@ def search():
                 if len(posting_list) > 0:
                     # Extract document IDs from the posting list
                     doc_ids = posting_list[:, 0]
-                    # Find intersection with candidate IDs
-                    relevant_ids = np.intersect1d(doc_ids, candidate_ids, assume_unique=True)
+
                     # Update scores for relevant document IDs
-                    for doc_id in relevant_ids:
-                        total_scores[int(doc_id)] += W_ANCHOR
+                    for doc_id in doc_ids:
                         if doc_id == 0:
-                            print("Anchor matched doc_id 0 for term:", term)
+                            continue
+                        total_scores[int(doc_id)] += W_ANCHOR
 
             except KeyError:
                 print(f"Term {term} not found in anchor index postings.")
@@ -347,26 +392,47 @@ def search():
         if doc_id == 0:
             print("Final matched doc_id 0 for")
         # Retrieve PageRank and PageView scores
-        pr = pagerank.get(doc_id, 0.00000001)
+        pr = pagerank.get(doc_id, 0)
         pv = pageviews.get(doc_id, 0)
 
         # Apply logarithmic scaling to PageRank and PageView
-        pr_nor = max(0.0, math.log10(pr) + 8)
-        pv_nor = math.log10(pv + 1) / 7.0
+        pr_nor = math.log10(pr * 1000 + 1)
+        pv_nor = math.log10(pv + 1)
+
         # Combine all components to get the final score
         final_score = score + (pr_nor * W_PR) + (pv_nor * W_PV)
+
         # Append to final results
         final_results.append((doc_id, final_score))
 
+    # -------------------------------------------------------
+    # Rerank the top 1000 docs
+    # -------------------------------------------------------
+
+    query_vector = get_text_vector(query)
+    reranked_results = []
+
+    for doc_id, score in final_results:
+        # Get title vector
+        title = id_to_title.get(doc_id, "Unknown")
+        title_vector = get_text_vector(title)
+
+        # Compute cosine similarity
+        norm = (np.linalg.norm(query_vector) * np.linalg.norm(title_vector))
+        semantic_score = np.dot(query_vector, title_vector) / norm if norm > 0 else 0
+
+        # Combine with previous score
+        final_score = (0.7 * score) + (0.3 * semantic_score)
+        reranked_results.append((doc_id, title, final_score))
     # -------------------------------------------------------
     # Final Sorting and Selection
     # -------------------------------------------------------
 
     # Sort the final results based on the combined score and select the top 100
-    top_100 = sorted(final_results, key=lambda x: x[1], reverse=True)[:100]
+    top_100 = sorted(reranked_results, key=lambda x: x[2], reverse=True)[:100]
 
     # Prepare the final output format (wiki_id, title)
-    res = [(str(doc_id), id_to_title.get(doc_id, "Unknown Title")) for doc_id, score in top_100]
+    res = [(str(doc_id), title) for doc_id, title, _ in top_100]
 
     # END SOLUTION
     return jsonify(res)
@@ -393,44 +459,36 @@ def search_body():
         return jsonify(res)
     # BEGIN SOLUTION
 
-    #
+    # Tokenize the query
     query_counts = Counter(tokenize_txt(query))
 
-    #
     candidate_scores = Counter()
-
-    #
     N = 6348910
-
-    #
+    # Calculate scores for each term in the query
     for term, tf_q in query_counts.items():
         if term not in body_index.df:
           continue
-
-        #
+        # Calculate IDF
         df = body_index.df[term]
         idf = math.log10(N / df)
-
-        #
+        # Calculate weight for the query term
         w_t_q = tf_q * idf
-
-        #
+        # Retrieve posting list for the term
         try:
             posting_list = body_index.read_posting_list(term, base_dir='.')
         except KeyError:
             continue
-
-        #
+        # Update scores for each document in the posting list
         for doc_id, tf_d in posting_list:
-            #
+            # Calculate weight for the document term
             w_t_d = tf_d * idf
-            #
+            # Accumulate the score
             candidate_scores[doc_id] += (w_t_q * w_t_d)
 
     if not candidate_scores:
       return jsonify([])
 
-    #
+    # Normalize scores by document norms
     results = []
     for doc_id, score in candidate_scores.items():
         try:
@@ -442,10 +500,10 @@ def search_body():
         final_score = score / norm
         results.append((doc_id, final_score))
 
-    #
+    # Sort and select top 100 results
     top_100 = sorted(results, key=lambda x: x[1], reverse=True)[:100]
 
-    #
+    # Prepare final output
     res = [(str(doc_id), id_to_title.get(doc_id, "Title not found")) for doc_id, score in top_100]
     # END SOLUTION
     return jsonify(res)
@@ -478,33 +536,26 @@ def search_title():
         return jsonify(res)
     # BEGIN SOLUTION
 
-    #
+    # Tokenize the query
     query_tokens = tokenize_txt(query)
-
-    #
     doc_scores = Counter()
-
-    #
+    # Iterate over each term in the query
     for term in query_tokens:
-
-        #
+        # Check if the term exists in the title index
         if term not in title_index.df:
             continue
-
-        #
+        # Retrieve the posting list for the term
         try:
             posting_list = title_index.read_posting_list(term, base_dir='.')
         except Exception as e:
             print(f"Error reading posting list for term {term}: {e}")
             continue
-        #
+        # Update scores: +1 for each document containing the term in the title
         for doc_id, tf in posting_list:
             doc_scores[doc_id] += 1
-
-    #
+    # Sort documents by score in descending order
     sorted_docs = sorted(doc_scores.items(), key=lambda x: x[1], reverse=True)
-
-    #
+    # Convert to (doc_id, title) format
     for doc_id, score in sorted_docs:
         title = id_to_title.get(doc_id, "Title Unknown")
         res.append((str(doc_id), title))
@@ -538,42 +589,27 @@ def search_anchor():
     if len(query) == 0:
       return jsonify(res)
     # BEGIN SOLUTION
-    # 1. טוקניזציה של השאילתה
-    #
+    # Tokenize the query
     query_tokens = tokenize_txt(query)
-
-    # מונה לציונים: {doc_id: unique_match_count}
     doc_scores = Counter()
 
-    # 2. מעבר על כל מילה בשאילתה
+    # Iterate over each term in the query
     for term in query_tokens:
-        # בדיקה אם המילה קיימת באינדקס העוגנים
-        # אנו מניחים ש-anchor_index נטען ב-initialize בצורה דומה ל-title_index
-        #
+        # Check if the term exists in the anchor index
         if term not in anchor_index.df:
             continue
-
-        # שליפת רשימת הפוסטינג עבור המילה מתוך ה-Bucket
-        # הפונקציה קוראת את המידע הבינארי וממירה אותו לרשימת (doc_id, tf)
-        #
         try:
             posting_list = anchor_index.read_posting_list(term, base_dir='.')
         except Exception as e:
             print(f"Error reading posting list for term {term}: {e}")
             continue
-
-        # עדכון הציון: +1 לכל מסמך שמקושר עם המילה הזו בטקסט העוגן
-        # ה-tf כאן מייצג כמה פעמים המילה הופיעה בקישורים לאותו דף, אך הדירוג הבינארי מתעלם מכך
+        # Update scores: +1 for each document containing the term in the anchor text
         for doc_id, tf in posting_list:
             doc_scores[doc_id] += 1
-
-    # 3. מיון התוצאות
-    # המיון הוא לפי הציון (מספר המילים הייחודיות) בסדר יורד
+    # Sort documents by score in descending order
     sorted_docs = sorted(doc_scores.items(), key=lambda x: x[1], reverse=True)
 
-    # 4. המרה לפורמט (doc_id, title)
-    # שימוש ב-id_to_title לתרגום מזהה מסמך לכותרת
-    #
+    # Convert to (doc_id, title) format
     for doc_id, score in sorted_docs:
         title = id_to_title.get(doc_id, "Title Unknown")
         res.append((str(doc_id), title))
@@ -601,12 +637,11 @@ def get_pagerank():
     if len(wiki_ids) == 0:
       return jsonify(res)
     # BEGIN SOLUTION
-    # מעבר על רשימת ה-IDs שהתקבלו ב-Body של הבקשה
+    # Iterate over the list of IDs received from the user
     for doc_id in wiki_ids:
-        # שליפת הציון מהמילון הגלובלי pagerank שנטען ב-initialize
-        # אם ה-ID לא קיים במילון (למשל דף ללא קישורים נכנסים או דף שלא חושב), נחזיר 0.0
+        # Retrieve the PageRank score from the global pagerank dictionary
         try:
-            # המרה ל-int ליתר ביטחון, למקרה שה-JSON העביר מחרוזות
+            # Convert to int in case the input came as strings
             doc_id = int(doc_id)
             score = pagerank.get(doc_id, 0.0)
         except (ValueError, TypeError):
@@ -638,12 +673,11 @@ def get_pageview():
     if len(wiki_ids) == 0:
       return jsonify(res)
     # BEGIN SOLUTION
-    # מעבר על רשימת ה-IDs שהתקבלו מהמשתמש
+    # Iterate over the list of IDs received from the user
     for doc_id in wiki_ids:
-        # שליפת הערך מהמילון הגלובלי pageviews
-        # אנו משתמשים ב-.get כדי להחזיר 0 אם הדף לא נמצא במאגר
+        # Retrieve the pageview count from the global pageviews dictionary
         try:
-            # המרה ל-int למקרה שהקלט הגיע כמחרוזות
+            # Convert to int in case the input came as strings
             val = pageviews.get(int(doc_id), 0)
         except (ValueError, TypeError):
             val = 0
@@ -656,5 +690,7 @@ def run(**options):
     app.run(**options)
 
 if __name__ == '__main__':
+    # Initialize the search engine when the server starts
+    initialize()
     # run the Flask RESTful API, make the server publicly available (host='0.0.0.0') on port 8080
     app.run(host='0.0.0.0', port=8080, debug=True, use_reloader=False)
