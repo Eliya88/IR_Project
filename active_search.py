@@ -3,19 +3,19 @@ import time
 import json
 from metrics import results_quality
 
+
 with open('queries_train.json', 'rt') as f:
   queries = json.load(f)
 
-# queries = {"Silk Road trade cultural exchange": []}
-
 qs_res = []
-EXTERNAL="34.170.95.149"
+# EXTERNAL="34.170.95.149"
+EXTERNAL="127.0.0.1"
 for q, true_wids in queries.items():
     duration, ap = None, None
     t_start = time.time()
     try:
         # res = requests.get(url + '/search', {'query': q}, timeout=35)
-        response = requests.get(f"http://{EXTERNAL}:8080/search?query={q}", timeout=35)
+        response = requests.get(f"http://{EXTERNAL}:8080/search?query={q}", timeout=10)
         duration = time.time() - t_start
 
         if response.status_code == 200:

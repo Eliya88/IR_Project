@@ -7,10 +7,10 @@ import io
 import pandas as pd
 import math
 import os
-import time
 import numpy as np
-from gensim.models import KeyedVectors
-
+# pip install sentence-transformers
+# pip install hf_xet
+from sentence_transformers import SentenceTransformer, util
 from inverted_index_gcp import InvertedIndex
 class MyFlaskApp(Flask):
     def run(self, host=None, port=None, debug=None, **options):
@@ -21,7 +21,7 @@ app = MyFlaskApp(__name__)
 app.config['JSONIFY_PRETTYPRINT_REGULAR'] = False
 
 # GCP Bucket configuration
-BUCKET_NAME = 'irbucket2'
+BUCKET_NAME = 'ir_bucket13'
 client = storage.Client()
 bucket = client.bucket(BUCKET_NAME)
 
@@ -34,31 +34,7 @@ id_to_title = None
 pagerank = None
 doc_norms = None
 pageviews = None
-w2v_model = None
-
-def load_pretrained_w2v(file_name):
-    """
-        Downloads and loads the Word2Vec model with a limit to save RAM.
-    """
-    global w2v_model
-
-    local_path = f"postings_gcp/{file_name}"
-
-    # Download if missing
-    if not os.path.exists(local_path):
-        print(f"Downloading model {file_name} from bucket...")
-        blob = bucket.blob(f"postings_gcp/{file_name}")
-        blob.download_to_filename(local_path)
-        print("Download complete.")
-    # Load the model
-    else:
-        print(f"Model {file_name} already exists on local disk.")
-
-    # Load with a LIMIT to prevent "Killed" (OOM) errors
-    print("Loading Pre-trained Word2Vec model into memory...")
-    # Loads the most common words
-    w2v_model = KeyedVectors.load_word2vec_format(local_path, binary=True, limit=300000)
-    print("Model loaded successfully.")
+sbert_model = None
 
 def download_and_load_pickle(blob_name):
     """
@@ -132,7 +108,6 @@ def download_index_files(directory='postings_gcp'):
     for blob in blobs:
         if blob.name.endswith('.bin'):
             # Determine local file path
-            #local_path = os.path.join('/content', blob.name)
             local_path = os.path.join(os.getcwd(), directory, os.path.basename(blob.name))
             # Skip download if file already exists
             if os.path.exists(local_path):
@@ -152,7 +127,7 @@ def initialize():
     :return:
     """
     # Define global variables
-    global body_index, tier1_index, title_index, anchor_index, id_to_title, pagerank, doc_norms, pageviews
+    global body_index, tier1_index, title_index, anchor_index, id_to_title, pagerank, doc_norms, pageviews, sbert_model
 
     if body_index is not None:
         return
@@ -160,6 +135,9 @@ def initialize():
     print("Initializing Search Engine...")
     # Download index binary files to local disk
     download_index_files()
+
+    # Load id to title mapping
+    id_to_title = download_and_load_pickle('id_to_title.pkl')
 
     # Download and load pickled indices
     body_index = download_and_load_pickle('body_index.pkl')
@@ -173,9 +151,6 @@ def initialize():
     title_index.posting_locs = download_and_load_pickle('title_locs.pkl')
     anchor_index.posting_locs = download_and_load_pickle('anchor_locs.pkl')
 
-    # Load id to title mapping
-    id_to_title = download_and_load_pickle('id_to_title.pkl')
-
     # Load PageRank scores
     pagerank = load_pagerank()
 
@@ -185,28 +160,10 @@ def initialize():
     # Load pageviews
     pageviews = download_and_load_pickle('pageviews.pkl')
 
-    # Load pre-trained Word2Vec model
-    load_pretrained_w2v('GoogleNews-vectors-negative300.bin.gz')
+    sbert_model = SentenceTransformer('multi-qa-MiniLM-L6-cos-v1')
+    print("SBERT loaded.\n")
 
     print("Initialization complete. Server is ready.")
-
-def get_text_vector(text):
-    """
-    Get the average Word2Vec vector for the given text.
-    :param text: input text
-    :return: average vector as numpy array
-    """
-    tokens = tokenize_txt(text)
-    vectors = []
-    # Collect vectors for each token
-    for word in tokens:
-        if word in w2v_model:
-            vectors.append(w2v_model[word])
-    # Compute the mean vector
-    if not vectors:
-        return np.zeros(w2v_model.vector_size)
-
-    return np.mean(vectors, axis=0)
 
 def get_body_scores(query, n, w_body):
     """
@@ -228,12 +185,11 @@ def get_body_scores(query, n, w_body):
         # Define posting list variable
         posting_list = None
         # Document frequency initialization
-        df = 0
+        df, idf_q = 0, 0
         # Check token is in the index
         if tok in tier1_index.df:
             # Retrieve the posting list for the term
             temp_list = np.array(tier1_index.read_posting_list(tok, base_dir=base_dir), dtype=np.int32)
-            print(f"Tier1 index found for term: {tok} - list size: {len(temp_list)}") # Debug print
             if len(temp_list) == 1000:
                 posting_list = temp_list
                 df = tier1_index.df[tok]
@@ -245,6 +201,7 @@ def get_body_scores(query, n, w_body):
             posting_list = np.array(body_index.read_posting_list(tok, base_dir=base_dir), dtype=np.int32)
             df = body_index.df[tok]
 
+
         # Update scores only if posting list is not empty
         if posting_list is not None and len(temp_list) > 0 and df > 0:
 
@@ -252,20 +209,53 @@ def get_body_scores(query, n, w_body):
             doc_ids = posting_list[:, 0].astype(np.int32)
             tfs = posting_list[:, 1]
 
-            # Calculate IDF and weight for the query term
-            idf = np.log10(n / df)
-            w_t_q = tf_q * idf
-
-            norms = np.array([doc_norms.get(int(d), 1.0) for d in doc_ids], dtype=np.float32)
+            # Calculate IDF using BM25 formula
+            idf_q = math.log10((n - df + 0.5) / (df + 0.5) + 1)
 
             # Calculate term scores
-            term_scores = ((tfs * idf) * w_t_q / norms) * w_body
+            term_scores = ((tfs * (1.5 + 1)) / (tfs + 1.5) * idf_q) * w_body
 
             # Accumulate scores for each document
             for i in range(len(doc_ids)):
                 scores[int(doc_ids[i])] += float(term_scores[i])
 
     return scores
+
+def get_index_score(query_tokens, total_scores, index, N, W, base_dir):
+    """
+    Calculate and update scores from the title index.
+    :param query_tokens:
+    :param total_scores:
+    :param N:
+    :param W_TITLE:
+    :param base_dir:
+    :return:
+    """
+    # Iterate over each term in the query
+    for term in query_tokens:
+        if term in index.df:
+            try:
+                # Retrieve the posting list for the term from the title index
+                posting_list = np.array(index.read_posting_list(term, base_dir=base_dir), dtype=np.int32)
+                if len(posting_list) > 0:
+                    # Extract document IDs from the posting list
+                    ids = posting_list[:, 0]
+                    # Calculate idf
+                    tf = index.df.get(term, 1)
+                    idf = math.log(N / tf)
+                    # Update scores for relevant document IDs
+                    for doc_id in ids:
+                        if doc_id == 0:
+                            continue
+                        total_scores[int(doc_id)] += (W * idf)
+
+            except KeyError:
+                print(f"Term {term} not found in title index postings.")
+                continue
+        else:
+            print(f"Term {term} not found in title index.")
+
+    return total_scores
 
 @app.route("/search")
 def search():
@@ -292,96 +282,44 @@ def search():
       return jsonify(res)
 
     # Tokenize the query with expansion
-    query_tokens = expand_query_w2v(query, model=w2v_model, index=title_index, top_n=1, threshold_df=5000)
+    query_tokens = tokenize(query)
+    print(f"Tokenized Query: {query_tokens}")
 
     if not query_tokens:
         return jsonify(res)
-    print(f"Tokenized Query: {query_tokens}")
 
     # Define weights for different components of the scoring
-    W_TITLE = 0.5
-    W_BODY = 0.2
-    W_ANCHOR = 0.2
+    W_TITLE = 0.2
+    W_BODY = 0.3
+    W_ANCHOR = 0.3
     W_PR = 0.1
     W_PV = 0.1
+    W_SEMANTIC = 0.3
     N = 6348910
     base_dir = 'postings_gcp'
 
     # -------------------------------------------------------
     # Body Index
     # -------------------------------------------------------
-    t_start = time.time()  # -------------------------
 
     # Get scores using only the tier1 index for efficiency
     total_scores = get_body_scores(query_tokens, N, w_body=W_BODY)
-
-    # Create a set of candidate document IDs from body scores
-    candidate_ids = np.array(list(total_scores.keys()), dtype=np.int32)
-
-    t_body = time.time()  # -------------------------
-    print(f"[PERF] Body scoring took: {t_body - t_start:.4f}s Candidates: {len(total_scores)}\n")
 
     # -------------------------------------------------------
     # Title Index
     # -------------------------------------------------------
 
-    t_start = time.time()  # -------------------------
-    # Iterate over each term in the query
-    for term in query_tokens:
-        if term in title_index.df:
-            try:
-                # Retrieve the posting list for the term from the title index
-                posting_list = np.array(title_index.read_posting_list(term, base_dir=base_dir), dtype=np.int32)
-                print(f"Title index found for term: {term} - list size: {len(posting_list)}")
-                if len(posting_list) > 0:
-                    # Extract document IDs from the posting list
-                    title_ids = posting_list[:, 0]
-                    # Update scores for relevant document IDs
-                    for doc_id in title_ids:
-                        if doc_id == 0:
-                            continue
-                        total_scores[int(doc_id)] += W_TITLE
-
-
-            except KeyError:
-                print(f"Term {term} not found in title index postings.")
-                continue
-        else:
-            print(f"Term {term} not found in title index.")
-
-    extra_end = time.time()
-    print(f"[PERF] Title took: {extra_end - t_start:.4f}s\n")
+    total_scores = get_index_score(query_tokens, total_scores, title_index, N, W_TITLE, base_dir)
 
     # -------------------------------------------------------
     # Anchor Index
     # -------------------------------------------------------
-    t_start = time.time()  # -------------------------
 
-    # Iterate over each term in the query
-    for term in query_tokens:
-        if term in anchor_index.df:
-            try:
-                posting_list = np.array(anchor_index.read_posting_list(term, base_dir=base_dir), dtype=np.int32)
-                print(f"Anchor index found for term: {term} - list size: {len(posting_list)}")
+    total_scores = get_index_score(query_tokens, total_scores, anchor_index, N, W_ANCHOR, base_dir)
 
-                if len(posting_list) > 0:
-                    # Extract document IDs from the posting list
-                    doc_ids = posting_list[:, 0]
-
-                    # Update scores for relevant document IDs
-                    for doc_id in doc_ids:
-                        if doc_id == 0:
-                            continue
-                        total_scores[int(doc_id)] += W_ANCHOR
-
-            except KeyError:
-                print(f"Term {term} not found in anchor index postings.")
-                continue
-        else:
-            print(f"Term {term} not found in anchor index.")
-
-    extra_end = time.time()
-    print(f"[PERF] Anchor scoring took: {extra_end - t_start:.4f}s")
+    # -------------------------------------------------------
+    # Integrate PageRank and PageView on most promising candidates
+    # -------------------------------------------------------
 
     # Retrieve the top 1000 candidate document IDs based on accumulated scores
     top_candidate_ids = total_scores.most_common(1000)
@@ -406,32 +344,43 @@ def search():
         final_results.append((doc_id, final_score))
 
     # -------------------------------------------------------
-    # Rerank the top 1000 docs
-    # -------------------------------------------------------
-
-    query_vector = get_text_vector(query)
-    reranked_results = []
-
-    for doc_id, score in final_results:
-        # Get title vector
-        title = id_to_title.get(doc_id, "Unknown")
-        title_vector = get_text_vector(title)
-
-        # Compute cosine similarity
-        norm = (np.linalg.norm(query_vector) * np.linalg.norm(title_vector))
-        semantic_score = np.dot(query_vector, title_vector) / norm if norm > 0 else 0
-
-        # Combine with previous score
-        final_score = (0.7 * score) + (0.3 * semantic_score)
-        reranked_results.append((doc_id, title, final_score))
-    # -------------------------------------------------------
-    # Final Sorting and Selection
+    # Sorting and Selection Top 100
     # -------------------------------------------------------
 
     # Sort the final results based on the combined score and select the top 100
-    top_100 = sorted(reranked_results, key=lambda x: x[2], reverse=True)[:100]
+    top_100 = sorted(final_results, key=lambda x: x[1], reverse=True)[:100]
+
+    # -------------------------------------------------------
+    # Reranking with SBERT
+    # -------------------------------------------------------
+
+    # Generate candidate titles for SBERT reranking
+    candidate_doc_ids = [doc_id for doc_id, score in top_100]
+    candidate_titles = [id_to_title.get(doc_id, "Unknown") for doc_id in candidate_doc_ids]
+
+    # Calculate SBERT embeddings
+    query_embedding = sbert_model.encode(query, convert_to_tensor=True)
+    title_embeddings = sbert_model.encode(candidate_titles, convert_to_tensor=True)
+
+    # Calculate cosine similarities
+    cosine_scores = util.cos_sim(query_embedding, title_embeddings)[0]
+
+    # Combine SBERT scores with original scores for reranking
+    reranked_results = []
+    for i in range(len(candidate_doc_ids)):
+        doc_id = candidate_doc_ids[i]
+        original_score = top_100[i][1]
+        semantic_score = cosine_scores[i].item()
+        # Combine scores with weights
+        final_score = ((1 - W_SEMANTIC) * original_score) + (W_SEMANTIC * semantic_score * 10)
+        # Append to reranked results
+        reranked_results.append((doc_id, candidate_titles[i], final_score))
+
+    # ReSorting reranked results
+    top_100 = sorted(reranked_results, key=lambda x: x[2], reverse=True)
 
     # Prepare the final output format (wiki_id, title)
+    # res = [(str(doc_id), id_to_title.get(doc_id, "Unknow Title")) for doc_id, _ in top_100]
     res = [(str(doc_id), title) for doc_id, title, _ in top_100]
 
     # END SOLUTION

@@ -7,7 +7,8 @@ from collections import defaultdict
 from contextlib import closing
 
 # Set GCP project ID
-PROJECT_ID = 'majestic-lodge-484113-r0'
+# PROJECT_ID = 'majestic-lodge-484113-r0'
+PROJECT_ID = 'inforet3-480016'
 # Let's start with a small block size of 30 bytes just to test things out.
 BLOCK_SIZE = 1999998
 TUPLE_SIZE = 6       # We're going to pack the doc_id and tf values in this
