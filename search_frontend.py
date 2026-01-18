@@ -165,25 +165,25 @@ def initialize():
 
     print("Initialization complete. Server is ready.")
 
-def get_body_scores(query, n, w_body):
+def get_body_scores(query, n, w_body, base_dir='postings_gcp'):
     """
     Calculate body scores using TF-IDF and Cosine Similarity.
     :param query: list of query tokens
     :param n: total number of documents
     :param w_body: weight for body scores
+    :param base_dir: base directory for posting lists
     :return: Counter with document scores
     """
     # Count the term frequencies in the query
     query_counts = Counter(query)
     # Define a counter to accumulate scores
     scores = Counter()
-    # Define base directory for postings
-    base_dir = 'postings_gcp'
 
     # Iterate over each unique term in the query
     for tok, tf_q in query_counts.items():
         # Define posting list variable
         posting_list = None
+        temp_list = None
         # Document frequency initialization
         df, idf_q = 0, 0
         # Check token is in the index
@@ -303,7 +303,7 @@ def search():
     # -------------------------------------------------------
 
     # Get scores using only the tier1 index for efficiency
-    total_scores = get_body_scores(query_tokens, N, w_body=W_BODY)
+    total_scores = get_body_scores(query_tokens, N, w_body=W_BODY, base_dir=base_dir)
 
     # -------------------------------------------------------
     # Title Index
@@ -412,19 +412,21 @@ def search_body():
     query_counts = Counter(tokenize_txt(query))
 
     candidate_scores = Counter()
+    base_dir = 'postings_gcp'
     N = 6348910
+
     # Calculate scores for each term in the query
     for term, tf_q in query_counts.items():
         if term not in body_index.df:
           continue
         # Calculate IDF
-        df = body_index.df[term]
+        df = body_index.df.get(term, 1)
         idf = math.log10(N / df)
         # Calculate weight for the query term
         w_t_q = tf_q * idf
         # Retrieve posting list for the term
         try:
-            posting_list = body_index.read_posting_list(term, base_dir='.')
+            posting_list = body_index.read_posting_list(term, base_dir=base_dir)
         except KeyError:
             continue
         # Update scores for each document in the posting list
@@ -435,7 +437,7 @@ def search_body():
             candidate_scores[doc_id] += (w_t_q * w_t_d)
 
     if not candidate_scores:
-      return jsonify([])
+      return jsonify([('0', 'No Results Found'), ('0', 'No Results Found')])
 
     # Normalize scores by document norms
     results = []
@@ -444,7 +446,7 @@ def search_body():
             doc_id = int(doc_id)
         except ValueError:
             raise ValueError(f"Document ID {doc_id} is not an integer.")
-
+        # Retrieve document norm
         norm = doc_norms.get(doc_id, 1)
         final_score = score / norm
         results.append((doc_id, final_score))
@@ -454,6 +456,7 @@ def search_body():
 
     # Prepare final output
     res = [(str(doc_id), id_to_title.get(doc_id, "Title not found")) for doc_id, score in top_100]
+
     # END SOLUTION
     return jsonify(res)
 
@@ -488,6 +491,8 @@ def search_title():
     # Tokenize the query
     query_tokens = tokenize_txt(query)
     doc_scores = Counter()
+    base_dir = 'postings_gcp'
+
     # Iterate over each term in the query
     for term in query_tokens:
         # Check if the term exists in the title index
@@ -495,7 +500,7 @@ def search_title():
             continue
         # Retrieve the posting list for the term
         try:
-            posting_list = title_index.read_posting_list(term, base_dir='.')
+            posting_list = title_index.read_posting_list(term, base_dir=base_dir)
         except Exception as e:
             print(f"Error reading posting list for term {term}: {e}")
             continue
@@ -504,10 +509,14 @@ def search_title():
             doc_scores[doc_id] += 1
     # Sort documents by score in descending order
     sorted_docs = sorted(doc_scores.items(), key=lambda x: x[1], reverse=True)
+
     # Convert to (doc_id, title) format
     for doc_id, score in sorted_docs:
         title = id_to_title.get(doc_id, "Title Unknown")
         res.append((str(doc_id), title))
+
+    if not res:
+        return jsonify([('0', 'No Results Found'), ('0', 'No Results Found')])
 
     # END SOLUTION
     return jsonify(res)
@@ -538,9 +547,11 @@ def search_anchor():
     if len(query) == 0:
       return jsonify(res)
     # BEGIN SOLUTION
+
     # Tokenize the query
     query_tokens = tokenize_txt(query)
     doc_scores = Counter()
+    base_dir = 'postings_gcp'
 
     # Iterate over each term in the query
     for term in query_tokens:
@@ -548,11 +559,11 @@ def search_anchor():
         if term not in anchor_index.df:
             continue
         try:
-            posting_list = anchor_index.read_posting_list(term, base_dir='.')
+            posting_list = anchor_index.read_posting_list(term, base_dir=base_dir)
         except Exception as e:
             print(f"Error reading posting list for term {term}: {e}")
             continue
-        # Update scores: +1 for each document containing the term in the anchor text
+        # Update scores for each document containing the term in the anchor text
         for doc_id, tf in posting_list:
             doc_scores[doc_id] += 1
     # Sort documents by score in descending order
@@ -562,6 +573,9 @@ def search_anchor():
     for doc_id, score in sorted_docs:
         title = id_to_title.get(doc_id, "Title Unknown")
         res.append((str(doc_id), title))
+
+    if not res:
+        return jsonify([('0', 'No Results Found'), ('0', 'No Results Found')])
 
     # END SOLUTION
     return jsonify(res)
