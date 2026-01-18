@@ -3,6 +3,7 @@ import nltk
 from nltk.corpus import stopwords
 from nltk.stem import PorterStemmer
 
+
 # Download necessary NLTK resources
 try:
     print("Getting stopwords...")

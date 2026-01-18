@@ -15,7 +15,7 @@ for q, true_wids in queries.items():
     t_start = time.time()
     try:
         # res = requests.get(url + '/search', {'query': q}, timeout=35)
-        response = requests.get(f"http://{EXTERNAL}:8080/search_anchor?query={q}", timeout=10)
+        response = requests.get(f"http://{EXTERNAL}:8080/search?query={q}", timeout=10)
         duration = time.time() - t_start
 
         if response.status_code == 200:

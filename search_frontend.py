@@ -21,7 +21,7 @@ app = MyFlaskApp(__name__)
 app.config['JSONIFY_PRETTYPRINT_REGULAR'] = False
 
 # GCP Bucket configuration
-BUCKET_NAME = 'ir_bucket13'
+BUCKET_NAME = 'irbucket2'
 client = storage.Client()
 bucket = client.bucket(BUCKET_NAME)
 
