@@ -28,11 +28,7 @@ RE_WORD = re.compile(r"""[#@\w](['\-]?\w){2,24}""", re.UNICODE)
 
 def tokenize(text):
     """
-    Tokenization function that processes the input text by:
-        1. Converting to lowercase
-        2. Extracting words using regex
-        3. Removing stopwords
-    :param text: Input text to be tokenized
+    Tokenization function that implements stemming on the tokens.
     :return: List of processed tokens
     """
     # Perform initial tokenization and stopword removal
